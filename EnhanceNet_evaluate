@@ -1,0 +1,99 @@
+import os
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+import cv2
+from EnhanceNet_model import EnhanceNet_Generator
+from EnhanceNet_model import EnhanceNet_Discriminator
+import pandas as pd
+
+
+# HR size
+hr_size = 224
+
+# LR size
+lr_size = 56
+
+# batch size
+BATCH_SIZE = 1
+
+# 处理图片
+def preprocess_image(image):
+    image = tf.image.decode_jpeg(image, channels=3)
+    size = tf.shape(image)
+    if size[1] <= hr_size or size[0] <= hr_size:
+        high_image = tf.image.resize(image, [hr_size, hr_size])
+    else:
+        high_image = tf.image.crop_to_bounding_box(image, 0, 0, hr_size, hr_size)
+        high_image = tf.cast(high_image, dtype=tf.float32)
+    low_image = tf.image.resize(high_image, [lr_size, lr_size])
+    return low_image, high_image
+
+
+# 加载图片
+def load_and_preprocess_image(path):
+    image = tf.io.read_file(path)
+    return preprocess_image(image)
+
+data_path = 'C:\\Users\\41149\\Desktop\\生成对抗网络\\EnhanceNet\\train2024'
+data_filenames = [data_path + "/" + filename for filename in os.listdir(data_path)]
+train_filenames, valid_filenames = train_test_split(data_filenames, test_size=0.98, shuffle=True, random_state=2)
+train_filenames, valid_filenames = train_test_split(train_filenames, test_size=0.1, shuffle=True, random_state=2)
+train_filenames, test_filenames = train_test_split(train_filenames, test_size=0.1, shuffle=True, random_state=2)
+
+AUTOTUNE = tf.data.experimental.AUTOTUNE
+path_test = tf.data.Dataset.from_tensor_slices(test_filenames)
+dataset_test = path_test.map(load_and_preprocess_image, num_parallel_calls=AUTOTUNE)
+dataset_test = dataset_test.batch(BATCH_SIZE)
+dataset_test = dataset_test.prefetch(AUTOTUNE)
+
+# 实例化生成器和判别器模型
+generator = EnhanceNet_Generator()
+discriminator = EnhanceNet_Discriminator()
+
+# 将生成器和判别器融为一体
+enhancenet = tf.keras.Sequential()
+enhancenet.add(generator)
+enhancenet.add(discriminator)
+
+model_path = ['enhancenet_2', 'enhancenet']
+model_name = ['enhancenet_2', 'enhancenet']
+
+excel_data = {}
+excel_data['model_name'] = []
+excel_data['psnr'] = []
+excel_data['ssim'] = []
+for k in range(len(model_path)):
+    i = 1
+    enhancenet.load_weights(model_path[k])
+    path = './Network_Interpolation/'+model_name[k]+'/'
+    if not os.path.exists(path):
+        os.makedirs(path)
+    psnr = 0
+    ssim = 0
+    for low_image, high_image in dataset_test.take(20):
+        gen_high_image =enhancenet.layers[0].predict(low_image)
+        psnr_re = tf.reduce_mean(tf.image.psnr(tf.clip_by_value(gen_high_image, 0, 255), tf.clip_by_value(high_image, 0, 255), max_val=255))
+        ssim_re = tf.reduce_mean(tf.image.ssim(tf.clip_by_value(gen_high_image, 0, 255), tf.clip_by_value(high_image, 0, 255), max_val=255))
+        psnr += psnr_re
+        ssim += ssim_re
+        gen_high_image = tf.squeeze(gen_high_image)
+        low_image = tf.squeeze(low_image)
+        high_image = tf.squeeze(high_image)
+        bilinear = tf.image.resize(low_image, [224, 224], method='bilinear')
+        bicubic = tf.image.resize(low_image, [224, 224], method='bicubic')
+        img_path_1 = 'gen_high_image_'+str(i)+'.png'
+        img_path_2 = 'low_image_'+str(i)+'.png'
+        img_path_3 = 'high_image_'+str(i)+'.png'
+        img_path_4 = 'bilinear_'+str(i)+'.png'
+        img_path_5 = 'bicubic_'+str(i)+'.png'
+        cv2.imwrite(path+img_path_1, gen_high_image.numpy())
+        cv2.imwrite(path+img_path_2, low_image.numpy())
+        cv2.imwrite(path+img_path_3, high_image.numpy())
+        cv2.imwrite(path+img_path_4, bilinear.numpy())
+        cv2.imwrite(path+img_path_5, bicubic.numpy())
+        i = i + 1
+    excel_data['model_name'].append(model_name[k])
+    excel_data['psnr'].append(psnr)
+    excel_data['ssim'].append(ssim)
+df = pd.DataFrame(excel_data)
+df.to_csv("EnhanceNet_metric.csv", index=False)
